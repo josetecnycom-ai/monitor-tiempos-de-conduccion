@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#ffffff">
+  <title>Tiempos de conducción | MyGeotab</title>
+  <link rel="stylesheet" href="styles.css">
+  <script defer src="app.js"></script>
+</head>
+<body>
+  <div class="app-shell">
+    <header class="topbar">
+      <a class="brand" href="#inicio" aria-label="Tiempos de conducción, inicio">
+        <span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 32 32"><path d="M6 23.5V8.5h3.2l8 9.8V8.5h3.1v15h-3.1l-8.1-9.9v9.9H6Z"/><path d="M24.1 9.3h2.2v13.4h-2.2z"/></svg></span>
+        <span class="brand-copy"><strong>Tiempos de conducción</strong><small>CONTROL DE TACÓGRAFO</small></span>
+      </a>
+      <div class="top-actions"><span class="connection"><i></i><span>Vigilancia activa</span></span><button class="avatar" aria-label="Usuario actual">MG</button></div>
+    </header>
+    <main id="inicio" class="main-content">
+      <section class="page-heading">
+        <div><div class="eyebrow">CUMPLIMIENTO · REGLAMENTO CE 561/2006</div><h1>Resumen de conducción</h1><p class="subtitle">Consulta los tiempos de conducción y los avisos de tu flota.</p></div>
+        <button class="button button-secondary" id="refresh"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M16.5 8a6.8 6.8 0 0 0-11.8-2L3 8m0 0V4.5M3 8h3.5M3.5 12a6.8 6.8 0 0 0 11.8 2L17 12m0 0v3.5M17 12h-3.5"/></svg>Actualizar</button>
+      </section>
+      <section class="stat-grid" aria-label="Resumen de avisos">
+        <article class="stat-card"><div class="stat-top"><span>Avisos activos</span><span class="stat-icon icon-red"><svg viewBox="0 0 24 24"><path d="M12 3 2.8 19h18.4L12 3Zm0 5.3v5.2m0 2.7v.2"/></svg></span></div><div class="stat-value" id="active-count">—</div><div class="stat-note">Conductores que requieren atención</div></article>
+        <article class="stat-card"><div class="stat-top"><span>Próximos límites</span><span class="stat-icon icon-amber"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M12 7v5l3.2 2"/></svg></span></div><div class="stat-value" id="upcoming-count">—</div><div class="stat-note">Aviso preventivo en los próximos 10 min</div></article>
+        <article class="stat-card"><div class="stat-top"><span>Conductores vigilados</span><span class="stat-icon icon-blue"><svg viewBox="0 0 24 24"><circle cx="9" cy="8" r="3"/><path d="M3.5 19v-1.5A4.5 4.5 0 0 1 8 13h2a4.5 4.5 0 0 1 4.5 4.5V19m1-8a3 3 0 1 0 0-6m1.5 8.2a4.2 4.2 0 0 1 4 4.3v.5"/></svg></span></div><div class="stat-value" id="driver-count">—</div><div class="stat-note">Según el filtro seleccionado</div></article>
+        <article class="stat-card"><div class="stat-top"><span>Última comprobación</span><span class="stat-icon icon-green"><svg viewBox="0 0 24 24"><path d="m5 12 4.3 4.3L19 6.8"/></svg></span></div><div class="stat-value stat-time" id="last-check">Conectando…</div><div class="stat-note">Se actualiza mientras MyGeotab está abierto</div></article>
+      </section>
+      <section class="content-grid">
+        <article class="panel drivers-panel">
+          <div class="panel-heading"><div><h2>Conductores</h2><p>Estado de conducción y límites próximos</p></div><button class="button button-tertiary" id="filters-button"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 5h14M5.5 10h9M8 15h4"/></svg>Filtros <span id="filter-count" class="filter-count">0</span></button></div>
+          <div class="filters" id="filters" hidden><label class="search-box"><svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="8.7" cy="8.7" r="5.4"/><path d="m13 13 4 4"/></svg><input id="search" type="search" placeholder="Buscar conductor o vehículo" aria-label="Buscar conductor o vehículo"></label><select id="alert-filter" aria-label="Filtrar por estado"><option value="all">Todos los estados</option><option value="active">Avisos activos</option><option value="upcoming">Próximos límites</option><option value="ok">Sin avisos</option></select></div>
+          <div class="table-wrap"><table><thead><tr><th>CONDUCTOR</th><th>VEHÍCULO</th><th>CONDUCCIÓN CONTINUA</th><th>DIARIA</th><th>SEMANAL / 2 SEMANAS</th><th>ESTADO</th></tr></thead><tbody id="drivers-body"><tr><td colspan="6" class="empty-state"><span class="loader"></span><strong>Conectando con MyGeotab</strong><span>Estamos obteniendo el estado de los tacógrafos.</span></td></tr></tbody></table></div>
+          <div class="table-footer"><span id="table-summary">Cargando conductores…</span><span class="source-note">Datos de tacógrafo · actualización periódica</span></div>
+        </article>
+        <aside class="panel alerts-panel"><div class="panel-heading"><div><h2>Centro de avisos</h2><p>Incidencias de la flota</p></div><span class="live-pill"><i></i> EN VIVO</span></div><div id="alert-list" class="alert-list"><div class="empty-alert"><div class="empty-check"><svg viewBox="0 0 24 24"><path d="m5 12 4.3 4.3L19 6.8"/></svg></div><strong>Preparando vigilancia</strong><span>Los avisos aparecerán aquí al detectar un límite próximo o superado.</span></div></div><button class="text-button" id="show-all">Ver todos los avisos <span aria-hidden="true">→</span></button></aside>
+      </section>
+      <section class="bottom-grid">
+        <article class="panel delivery-panel"><div class="panel-heading"><div><h2>Canales de notificación</h2><p>Configura cómo reciben avisos los usuarios seleccionados</p></div><button class="button button-tertiary" id="settings-button">Configurar</button></div><div class="channel-row"><span class="channel-icon mail-icon"><svg viewBox="0 0 24 24"><rect x="3.5" y="5.5" width="17" height="13" rx="2"/><path d="m4.5 7 7.5 5.5L19.5 7"/></svg></span><div><strong>Correo electrónico</strong><span>Al correo del usuario en MyGeotab</span></div><span class="channel-state" id="email-state">Por configurar</span></div><div class="channel-row"><span class="channel-icon push-icon"><svg viewBox="0 0 24 24"><path d="M18 9a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9m-8 12a2 2 0 0 0 4 0"/></svg></span><div><strong>Push móvil MyGeotab</strong><span>Para usuarios con la aplicación móvil</span></div><span class="channel-state" id="push-state">Por configurar</span></div><div class="channel-row"><span class="channel-icon inapp-icon"><svg viewBox="0 0 24 24"><path d="M5 18.5 3.5 21v-5.5A8.5 8.5 0 1 1 12 21H7"/><path d="M8 10h8m-8 4h5"/></svg></span><div><strong>Notificación en MyGeotab</strong><span>Aviso visible mientras el usuario está conectado</span></div><span class="channel-state enabled">Disponible</span></div></article>
+        <article class="panel rules-panel"><div class="panel-heading"><div><h2>Reglas vigiladas</h2><p>Según el Reglamento CE 561/2006</p></div></div><div class="rule-list"><div><span class="rule-dot red"></span><span>Conducción continua</span><span class="rule-limit">4 h 30 min</span></div><div><span class="rule-dot amber"></span><span>Conducción diaria</span><span class="rule-limit">9 h · hasta 10 h, 2 veces/semana</span></div><div><span class="rule-dot blue"></span><span>Conducción semanal</span><span class="rule-limit">56 h</span></div><div><span class="rule-dot purple"></span><span>Conducción bisemanal</span><span class="rule-limit">90 h</span></div><div><span class="rule-dot gray"></span><span>Descansos diarios y semanales</span><span class="rule-limit">Incluye compensaciones</span></div></div><div class="rule-footnote">Los límites finales consideran pausas, descansos reducidos y extensiones permitidas.</div></article>
+      </section>
+      <footer class="footer"><span>Tiempos de conducción <span class="footer-sep">·</span> Integrado con MyGeotab</span><span>Los cálculos dependen de los datos recibidos del tacógrafo.</span></footer>
+    </main>
+    <div class="toast-region" id="toast-region" aria-live="polite" aria-atomic="false"></div>
+    <dialog id="settings-dialog" class="settings-dialog"><form method="dialog"><div class="dialog-head"><div><div class="eyebrow">PREFERENCIAS</div><h2>Configuración de avisos</h2></div><button class="icon-button" value="cancel" aria-label="Cerrar">×</button></div><p class="dialog-copy">Elige qué avisos mostrar. Los destinatarios se seleccionan entre los usuarios de MyGeotab.</p><label class="setting-line"><span><strong>Aviso preventivo</strong><small>10 minutos antes de alcanzar el límite</small></span><input type="checkbox" id="pre-alert" checked><i></i></label><label class="setting-line"><span><strong>Aviso de límite superado</strong><small>Cuando se excede un límite reglamentario</small></span><input type="checkbox" id="over-alert" checked><i></i></label><div class="dialog-section"><strong>Destinatarios</strong><p>La selección de usuarios estará disponible al conectar con la API de MyGeotab.</p><div class="recipient-placeholder"><svg viewBox="0 0 24 24"><circle cx="9" cy="8" r="3"/><path d="M3.5 19v-1.5A4.5 4.5 0 0 1 8 13h2a4.5 4.5 0 0 1 4.5 4.5V19m1-8a3 3 0 1 0 0-6m1.5 8.2a4.2 4.2 0 0 1 4 4.3v.5"/></svg>Usuarios y grupos de MyGeotab</div></div><button class="button button-primary dialog-save" value="save">Guardar preferencias</button></form></dialog>
+  </div>
+</body>
+</html>

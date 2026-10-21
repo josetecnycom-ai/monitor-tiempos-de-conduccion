@@ -1,0 +1,17 @@
+{
+  "name": "Tiempos de conducción",
+  "supportEmail": "REPLACE_WITH_SUPPORT_EMAIL",
+  "version": "0.1.0",
+  "items": [
+    {
+      "url": "REPLACE_WITH_GITHUB_PAGES_URL/index.html",
+      "path": "ActivityLink",
+      "menuName": {
+        "es": "Tiempos de conducción",
+        "en": "Driving times"
+      },
+      "svgIcon": "REPLACE_WITH_GITHUB_PAGES_URL/assets/driving.svg"
+    }
+  ],
+  "files": {}
+}
