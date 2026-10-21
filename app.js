@@ -18,12 +18,14 @@
   const els = {};
   let api = null;
   let refreshTimer = null;
+  let loadInProgress = false;
   let drivers = [];
   let alerts = [];
   let latestStatus = [];
   let shownAlertKeys = new Set();
   let uiBound = false;
   let activityChecks = new Map();
+  let activityChecksInFlight = new Set();
   let alertPrefs = { preventive: true, exceeded: true };
 
   function initElements() {
@@ -70,16 +72,21 @@
   }
 
   async function loadStatus() {
-    if (!api) return;
+    if (!api || loadInProgress) return;
+    loadInProgress = true;
     setConnection('Cargando datos…', false);
     try {
       // This endpoint is documented in the supplied Tachograph API guide.
       latestStatus = await callGet('TachographDrivingTimeStatus', {});
-      const ids = latestStatus.map((row) => row.user?.id).filter(Boolean);
       const now = Date.now();
-      const users = ids.length ? await callGet('User', { userIds: ids, fromDate: new Date(now).toISOString() }, ['id', 'name', 'firstName', 'lastName', 'isDriver', 'activeFrom', 'activeTo', 'driverGroups']) : [];
+      // Build an explicit allow-list from active drivers instead of trusting
+      // every user returned by the tachograph status feed.
+      const users = await callGet('User', {
+        userSearchType: 'Driver',
+        fromDate: new Date(now).toISOString()
+      }, ['id', 'name', 'firstName', 'lastName', 'isDriver', 'activeFrom', 'activeTo', 'driverGroups']);
       const userById = new Map(users
-        .filter((user) => isActiveUser(user, now))
+        .filter((user) => user.isDriver === true && isActiveUser(user, now))
         .map((user) => [user.id, user]));
       // The tachograph status endpoint can include archived drivers. Keep only
       // rows that match a currently active MyGeotab User record.
@@ -88,10 +95,14 @@
       const devices = vehicleIds.length ? await callGet('Device', { deviceIds: vehicleIds }, ['id', 'name', 'licensePlate']) : [];
       const deviceById = new Map(devices.map((device) => [device.id, device]));
       drivers = activeStatus.map((row) => normalizeDriver(row, userById.get(row.user?.id), deviceById.get(row.activityLastVehicle)));
-      await checkUnknownDrivers();
       alerts = evaluateAlerts(drivers);
       render();
       announceNewAlerts(alerts);
+      // Historical activity is only a data-quality cross-check. Run it after
+      // the dashboard is visible so it cannot delay the driver list.
+      checkUnknownDrivers().then(() => renderTable()).catch((error) => {
+        console.warn('No se pudo contrastar la actividad histórica.', error);
+      });
       els.lastCheck.textContent = new Intl.DateTimeFormat('es-ES', { hour: '2-digit', minute: '2-digit' }).format(new Date());
       setConnection('Vigilancia activa', true);
     } catch (error) {
@@ -99,6 +110,8 @@
       setConnection('Sin conexión', false);
       if (!drivers.length) showLoadError(error);
       toast('No se pudieron actualizar los datos de tacógrafo.', 'error');
+    } finally {
+      loadInProgress = false;
     }
   }
 
@@ -148,10 +161,15 @@
     const unresolved = drivers.filter((driver) => driver.statusUnknown && driver.hasZeroCounters && driver.id);
     const due = unresolved.filter((driver) => {
       const previous = activityChecks.get(driver.id);
-      return !previous || now - previous.checkedAt >= 10 * 60 * 1000;
+      return !activityChecksInFlight.has(driver.id) && (!previous || now - previous.checkedAt >= 10 * 60 * 1000);
     }).slice(0, 12);
+    if (!due.length) {
+      for (const driver of drivers) driver.activityEvidence = activityChecks.get(driver.id) ?? null;
+      return;
+    }
     const fromDate = new Date(now - 14 * 24 * 60 * 60 * 1000).toISOString();
     const toDate = new Date(now).toISOString();
+    due.forEach((driver) => activityChecksInFlight.add(driver.id));
     const checks = await Promise.allSettled(due.map(async (driver) => {
       const rows = await api.call('Get', {
         typeName: 'TachographDriverActivity',
@@ -168,6 +186,7 @@
     for (const check of checks) {
       if (check.status === 'fulfilled') activityChecks.set(check.value[0], check.value[1]);
     }
+    due.forEach((driver) => activityChecksInFlight.delete(driver.id));
     for (const driver of drivers) driver.activityEvidence = activityChecks.get(driver.id) ?? null;
   }
 
