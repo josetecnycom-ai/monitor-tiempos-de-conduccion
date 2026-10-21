@@ -213,7 +213,7 @@
       if (filter === 'upcoming' && !driverAlerts.some((item) => !item.exceeded)) return false;
       if (filter === 'ok' && driverAlerts.length) return false;
       return true;
-    });
+    }).sort(compareDriverUrgency);
     if (!filtered.length) {
       els.body.innerHTML = `<tr><td colspan="6" class="empty-state"><strong>${drivers.length ? 'No hay resultados' : 'Sin actividad en la semana actual'}</strong><span>${drivers.length ? 'Prueba a cambiar el filtro o la búsqueda.' : 'Solo se muestran conductores activos con conducción registrada en la semana reglamentaria actual.'}</span></td></tr>`;
     } else {
@@ -234,6 +234,20 @@
       }).join('');
     }
     els.summary.textContent = `${filtered.length} de ${drivers.length} conductores`;
+  }
+
+  function compareDriverUrgency(leftDriver, rightDriver) {
+    const leftTime = driverTimeToNearestLimit(leftDriver);
+    const rightTime = driverTimeToNearestLimit(rightDriver);
+    if (leftTime !== rightTime) return leftTime - rightTime;
+    return leftDriver.name.localeCompare(rightDriver.name, 'es');
+  }
+
+  function driverTimeToNearestLimit(driver) {
+    if (driver.statusUnknown && driver.hasZeroCounters) return Number.POSITIVE_INFINITY;
+    const remaining = [driver.continuousLeft, driver.dailyLeft, driver.weeklyLeft, driver.biweeklyLeft]
+      .filter((seconds) => seconds !== null && Number.isFinite(seconds));
+    return remaining.length ? Math.min(...remaining) : Number.POSITIVE_INFINITY;
   }
 
   function remainingLabel(seconds, suffix) {
