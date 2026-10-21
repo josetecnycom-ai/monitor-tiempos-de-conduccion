@@ -76,12 +76,18 @@
       // This endpoint is documented in the supplied Tachograph API guide.
       latestStatus = await callGet('TachographDrivingTimeStatus', {});
       const ids = latestStatus.map((row) => row.user?.id).filter(Boolean);
-      const users = ids.length ? await callGet('User', { userIds: ids }, ['id', 'name', 'firstName', 'lastName', 'isDriver', 'driverGroups']) : [];
-      const userById = new Map(users.map((user) => [user.id, user]));
-      const vehicleIds = [...new Set(latestStatus.map((row) => row.activityLastVehicle).filter(Boolean))];
+      const now = Date.now();
+      const users = ids.length ? await callGet('User', { userIds: ids, fromDate: new Date(now).toISOString() }, ['id', 'name', 'firstName', 'lastName', 'isDriver', 'activeFrom', 'activeTo', 'driverGroups']) : [];
+      const userById = new Map(users
+        .filter((user) => isActiveUser(user, now))
+        .map((user) => [user.id, user]));
+      // The tachograph status endpoint can include archived drivers. Keep only
+      // rows that match a currently active MyGeotab User record.
+      const activeStatus = latestStatus.filter((row) => userById.has(row.user?.id));
+      const vehicleIds = [...new Set(activeStatus.map((row) => row.activityLastVehicle).filter(Boolean))];
       const devices = vehicleIds.length ? await callGet('Device', { deviceIds: vehicleIds }, ['id', 'name', 'licensePlate']) : [];
       const deviceById = new Map(devices.map((device) => [device.id, device]));
-      drivers = latestStatus.map((row) => normalizeDriver(row, userById.get(row.user?.id), deviceById.get(row.activityLastVehicle)));
+      drivers = activeStatus.map((row) => normalizeDriver(row, userById.get(row.user?.id), deviceById.get(row.activityLastVehicle)));
       await checkUnknownDrivers();
       alerts = evaluateAlerts(drivers);
       render();
@@ -94,6 +100,13 @@
       if (!drivers.length) showLoadError(error);
       toast('No se pudieron actualizar los datos de tacógrafo.', 'error');
     }
+  }
+
+  function isActiveUser(user, now) {
+    const activeFrom = user.activeFrom ? Date.parse(user.activeFrom) : NaN;
+    const activeTo = user.activeTo ? Date.parse(user.activeTo) : NaN;
+    return (!Number.isFinite(activeFrom) || activeFrom <= now) &&
+      (!Number.isFinite(activeTo) || activeTo > now);
   }
 
   function normalizeDriver(status, user, device) {
