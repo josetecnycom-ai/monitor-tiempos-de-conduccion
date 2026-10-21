@@ -15,6 +15,8 @@
     biweekly: 90 * 3600
   };
   const $ = (selector) => document.querySelector(selector);
+  const scriptUrl = document.querySelector('script[src*="app.js"]')?.src;
+  const appVersion = scriptUrl ? new URL(scriptUrl).searchParams.get('v') : null;
   const els = {};
   let api = null;
   let refreshTimer = null;
@@ -28,11 +30,15 @@
   const activityEligibilityCache = new Map();
   const ACTIVITY_CACHE_MS = 10 * 60 * 1000;
   const ACTIVITY_RETRY_MS = 60 * 1000;
-  const MAX_ACTIVITY_CHECKS_PER_REFRESH = 60;
+  // Smaller multiCall batches return control to the dashboard sooner and leave
+  // quota headroom for other MyGeotab pages and add-ins in the same session.
+  const MAX_ACTIVITY_CHECKS_PER_REFRESH = 20;
   let activityCursor = 0;
   let alertPrefs = { preventive: true, exceeded: true };
 
   function initElements() {
+    const versionLabel = $('#addin-version');
+    if (versionLabel) versionLabel.textContent = appVersion ? `Versión ${appVersion}` : 'Versión local';
     Object.assign(els, {
       active: $('#active-count'), upcoming: $('#upcoming-count'), drivers: $('#driver-count'),
       lastCheck: $('#last-check'), body: $('#drivers-body'), summary: $('#table-summary'),
@@ -79,12 +85,14 @@
     if (!api || loadInProgress) return;
     loadInProgress = true;
     setConnection('Cargando datos…', false);
+    let loadingStage = 'estado de conducción del tacógrafo';
     try {
       // This endpoint is documented in the supplied Tachograph API guide.
       latestStatus = await callGet('TachographDrivingTimeStatus', {});
       const now = Date.now();
       // Build an explicit allow-list from active drivers instead of trusting
       // every user returned by the tachograph status feed.
+      loadingStage = 'usuarios activos de MyGeotab';
       const users = await callGet('User', {
         userSearchType: 'Driver',
         fromDate: new Date(now).toISOString()
@@ -98,6 +106,7 @@
       setConnection('Comprobando actividad de los últimos 7 días…', false);
       let activityResult = { eligible: new Set(), pending: 0, error: null };
       if (activeStatus.length) {
+        loadingStage = 'actividad de conducción de los últimos 7 días';
         const fromDate = new Date(now - 7 * 24 * 60 * 60 * 1000).toISOString();
         const toDate = new Date(now).toISOString();
         activityResult = await getRecentDrivingActivity(activeStatus, fromDate, toDate, now);
@@ -108,6 +117,7 @@
         pendingActivityChecks = 0;
       }
       const vehicleIds = [...new Set(latestStatus.map((row) => row.activityLastVehicle).filter(Boolean))];
+      loadingStage = 'vehículos';
       const devices = vehicleIds.length ? await callGet('Device', { deviceIds: vehicleIds }, ['id', 'name', 'licensePlate']) : [];
       const deviceById = new Map(devices.map((device) => [device.id, device]));
       drivers = latestStatus.map((row) => normalizeDriver(row, userById.get(row.user?.id), deviceById.get(row.activityLastVehicle)));
@@ -121,10 +131,10 @@
       }
       if (activityResult.error) console.warn('No se pudieron comprobar todos los conductores por el límite de consultas.', activityResult.error);
     } catch (error) {
-      console.error('No se pudo consultar el estado del tacógrafo.', error);
+      console.error(`No se pudo cargar ${loadingStage}.`, error);
       setConnection('Sin conexión', false);
-      if (!drivers.length) showLoadError(error);
-      toast('No se pudieron actualizar los datos de tacógrafo.', 'error');
+      if (!drivers.length) showLoadError(error, loadingStage);
+      toast(isConnectionError(error) ? 'Se interrumpió la conexión con MyGeotab. Se volverá a intentar automáticamente.' : 'No se pudieron actualizar los datos de tacógrafo.', 'error');
     } finally {
       loadInProgress = false;
     }
@@ -318,11 +328,23 @@
     shownAlertKeys = currentKeys;
   }
 
-  function showLoadError(error) {
-    const message = String(error?.message || 'Comprueba la sesión y los permisos de tacógrafo.');
+  function showLoadError(error, stage) {
+    const message = getLoadErrorMessage(error, stage);
     els.body.innerHTML = `<tr><td colspan="6" class="empty-state"><strong>No se pudo cargar la flota</strong><span>${escapeHtml(message)}</span></td></tr>`;
     els.alerts.innerHTML = `<div class="empty-alert"><strong>Vigilancia sin datos</strong><span>Se necesita permiso de lectura del estado de tacógrafo en MyGeotab.</span></div>`;
     els.summary.textContent = 'No se pudieron cargar los conductores';
+  }
+
+  function isConnectionError(error) {
+    return error?.name === 'ServerStopped' || error?.isNetworkException === true || error?.isConnectionInterruptedException === true || Number(error?.ajax?.status ?? error?.xhrStatus) === 0;
+  }
+
+  function getLoadErrorMessage(error, stage) {
+    if (isConnectionError(error)) {
+      return `La conexión con MyGeotab se interrumpió mientras se consultaba ${stage || 'la flota'} (ServerStopped). Comprueba que la sesión siga activa; el add-in volverá a intentarlo automáticamente.`;
+    }
+    const detail = String(error?.message || '').trim();
+    return detail ? `${detail} (${stage || 'consulta de flota'}). Comprueba también los permisos de tacógrafo.` : `No se pudo consultar ${stage || 'la flota'}. Comprueba la sesión y los permisos de tacógrafo.`;
   }
 
   function setConnection(label, active) {
