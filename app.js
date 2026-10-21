@@ -23,6 +23,7 @@
   let latestStatus = [];
   let shownAlertKeys = new Set();
   let uiBound = false;
+  let activityChecks = new Map();
   let alertPrefs = { preventive: true, exceeded: true };
 
   function initElements() {
@@ -81,6 +82,7 @@
       const devices = vehicleIds.length ? await callGet('Device', { deviceIds: vehicleIds }, ['id', 'name', 'licensePlate']) : [];
       const deviceById = new Map(devices.map((device) => [device.id, device]));
       drivers = latestStatus.map((row) => normalizeDriver(row, userById.get(row.user?.id), deviceById.get(row.activityLastVehicle)));
+      await checkUnknownDrivers();
       alerts = evaluateAlerts(drivers);
       render();
       announceNewAlerts(alerts);
@@ -102,7 +104,7 @@
     const biweeklyLeft = secondsLeft(status, 'biweeklyDrivingAvailableTime', 'cumulatedBiweeklyDrivingTime', null);
     return {
       id: status.user?.id,
-      name: user?.name || [user?.firstName, user?.lastName].filter(Boolean).join(' ') || status.user?.id || 'Conductor',
+      name: [user?.firstName, user?.lastName].filter(Boolean).join(' ').trim() || status.user?.id || 'Conductor sin nombre',
       vehicle: device?.licensePlate || device?.name || status.activityLastVehicle || 'Sin vehículo asociado',
       activity: status.activityStatus || status.workActivityStatus || 'UNKNOWN',
       continuous: Number(status.continuousDrivingTime) || 0,
@@ -121,8 +123,53 @@
       nextRestStartLimit: status.nextRestMaxStartTime,
       weeklyRestStartLimit: status.weeklyRestMaxStartTime,
       pendingCompensations: Number(status.pendingCompensations) || 0,
-      nextCompensationDuration: Number(status.nextCompensationDuration) || 0
+      nextCompensationDuration: Number(status.nextCompensationDuration) || 0,
+      statusUnknown: String(status.activityStatus || '').toUpperCase() === 'UNKNOWN',
+      hasZeroCounters: ['continuousDrivingTime', 'dailyDrivingTime', 'cumulatedWeeklyDrivingTime'].every((key) => Number(status[key]) === 0),
+      activityEvidence: null
     };
+  }
+
+  async function checkUnknownDrivers() {
+    const now = Date.now();
+    const unresolved = drivers.filter((driver) => driver.statusUnknown && driver.hasZeroCounters && driver.id);
+    const due = unresolved.filter((driver) => {
+      const previous = activityChecks.get(driver.id);
+      return !previous || now - previous.checkedAt >= 10 * 60 * 1000;
+    }).slice(0, 12);
+    const fromDate = new Date(now - 14 * 24 * 60 * 60 * 1000).toISOString();
+    const toDate = new Date(now).toISOString();
+    const checks = await Promise.allSettled(due.map(async (driver) => {
+      const rows = await api.call('Get', {
+        typeName: 'TachographDriverActivity',
+        search: {
+          type: 'COMBINE',
+          extrapolate: true,
+          userSearch: { id: driver.id },
+          fromDate,
+          toDate
+        }
+      });
+      return [driver.id, { ...summarizeRecentDriving(rows, now), checkedAt: now }];
+    }));
+    for (const check of checks) {
+      if (check.status === 'fulfilled') activityChecks.set(check.value[0], check.value[1]);
+    }
+    for (const driver of drivers) driver.activityEvidence = activityChecks.get(driver.id) ?? null;
+  }
+
+  function summarizeRecentDriving(events, now) {
+    const sorted = (Array.isArray(events) ? events : []).map((event) => ({
+      time: new Date(event.dateTime || event.time).getTime(),
+      activity: String(event.activity || '').toUpperCase()
+    })).filter((event) => Number.isFinite(event.time)).sort((a, b) => a.time - b.time);
+    let drivingSeconds = 0;
+    for (let index = 0; index < sorted.length; index += 1) {
+      const current = sorted[index];
+      const nextTime = sorted[index + 1]?.time ?? now;
+      if (current.activity === 'DRIVING' && nextTime > current.time) drivingSeconds += (Math.min(nextTime, now) - current.time) / 1000;
+    }
+    return { drivingSeconds: Math.max(0, Math.floor(drivingSeconds)), events: sorted.length };
   }
 
   function thresholdAlerts(driver) {
@@ -175,8 +222,17 @@
       els.body.innerHTML = filtered.map((driver) => {
         const statusAlerts = alerts.filter((item) => item.driver.id === driver.id);
         const severe = statusAlerts.some((item) => item.exceeded);
-        const badge = severe ? '<span class="badge badge-red">Límite superado</span>' : statusAlerts.length ? '<span class="badge badge-amber">Próximo límite</span>' : '<span class="badge badge-green">Dentro de límite</span>';
-        return `<tr><td><strong class="driver-name">${escapeHtml(driver.name)}</strong><small class="cell-sub">${escapeHtml(driver.activity)}</small></td><td>${escapeHtml(driver.vehicle)}</td><td>${formatDuration(driver.continuous)}<small class="cell-sub">${remainingLabel(driver.continuousLeft, 'pausa')}</small></td><td>${formatDuration(driver.daily)}<small class="cell-sub">${remainingLabel(driver.dailyLeft, 'disponibles')}</small></td><td>${formatDuration(driver.weekly)}<small class="cell-sub">${remainingLabel(driver.weeklyLeft, 'semanales')} · ${formatDuration(driver.biweekly)} 2 sem.</small></td><td>${badge}</td></tr>`;
+        const unavailable = driver.statusUnknown && driver.hasZeroCounters;
+        const badge = severe ? '<span class="badge badge-red">Límite superado</span>' : statusAlerts.length ? '<span class="badge badge-amber">Próximo límite</span>' : unavailable ? '<span class="badge badge-gray">Datos no confirmados</span>' : '<span class="badge badge-green">Dentro de límite</span>';
+        const evidence = unavailable && driver.activityEvidence?.drivingSeconds > 0
+          ? `Conducción registrada en actividad (14 días): ${formatDuration(driver.activityEvidence.drivingSeconds)}; resumen de estado sin confirmar`
+          : unavailable ? 'Estado del tacógrafo desconocido; no se muestran ceros como tiempos válidos' : escapeHtml(driver.activity);
+        const continuous = unavailable ? '—' : formatDuration(driver.continuous);
+        const daily = unavailable ? '—' : formatDuration(driver.daily);
+        const weekly = unavailable ? '—' : formatDuration(driver.weekly);
+        const biweekly = unavailable ? '—' : formatDuration(driver.biweekly);
+        const left = (value, label) => unavailable ? 'Sin datos confirmados' : remainingLabel(value, label);
+        return `<tr><td><strong class="driver-name">${escapeHtml(driver.name)}</strong><small class="cell-sub">${evidence}</small></td><td>${escapeHtml(driver.vehicle)}</td><td>${continuous}<small class="cell-sub">${left(driver.continuousLeft, 'pausa')}</small></td><td>${daily}<small class="cell-sub">${left(driver.dailyLeft, 'disponibles')}</small></td><td>${weekly}<small class="cell-sub">${left(driver.weeklyLeft, 'semanales')} · ${biweekly} 2 sem.</small></td><td>${badge}</td></tr>`;
       }).join('');
     }
     els.summary.textContent = `${filtered.length} de ${drivers.length} conductores`;
@@ -245,6 +301,25 @@
     els.search.addEventListener('input', renderTable);
     els.statusFilter.addEventListener('change', renderTable);
     $('#settings-button').addEventListener('click', () => els.dialog.showModal());
+    const setSummaryFilter = (value) => {
+      els.filters.hidden = false;
+      els.statusFilter.value = value;
+      renderTable();
+      document.querySelector('.drivers-panel').scrollIntoView({ behavior: 'smooth', block: 'start' });
+    };
+    const bindCard = (selector, filter) => {
+      const card = $(selector);
+      card.addEventListener('click', () => setSummaryFilter(filter));
+      card.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault();
+          setSummaryFilter(filter);
+        }
+      });
+    };
+    bindCard('#active-card', 'active');
+    bindCard('#upcoming-card', 'upcoming');
+    bindCard('#drivers-card', 'all');
     $('#show-all').addEventListener('click', () => {
       els.filters.hidden = false;
       els.statusFilter.value = 'active';
