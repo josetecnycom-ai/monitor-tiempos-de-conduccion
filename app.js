@@ -24,8 +24,6 @@
   let latestStatus = [];
   let shownAlertKeys = new Set();
   let uiBound = false;
-  let activityChecks = new Map();
-  let activityChecksInFlight = new Set();
   let alertPrefs = { preventive: true, exceeded: true };
 
   function initElements() {
@@ -91,18 +89,22 @@
       // The tachograph status endpoint can include archived drivers. Keep only
       // rows that match a currently active MyGeotab User record.
       const activeStatus = latestStatus.filter((row) => userById.has(row.user?.id));
-      const vehicleIds = [...new Set(activeStatus.map((row) => row.activityLastVehicle).filter(Boolean))];
+      setConnection('Comprobando actividad de los últimos 7 días…', false);
+      if (activeStatus.length) {
+        const fromDate = new Date(now - 7 * 24 * 60 * 60 * 1000).toISOString();
+        const toDate = new Date(now).toISOString();
+        const activityByUser = await getRecentDrivingActivity(activeStatus, fromDate, toDate);
+        latestStatus = activeStatus.filter((row) => activityByUser.has(row.user?.id));
+      } else {
+        latestStatus = [];
+      }
+      const vehicleIds = [...new Set(latestStatus.map((row) => row.activityLastVehicle).filter(Boolean))];
       const devices = vehicleIds.length ? await callGet('Device', { deviceIds: vehicleIds }, ['id', 'name', 'licensePlate']) : [];
       const deviceById = new Map(devices.map((device) => [device.id, device]));
-      drivers = activeStatus.map((row) => normalizeDriver(row, userById.get(row.user?.id), deviceById.get(row.activityLastVehicle)));
+      drivers = latestStatus.map((row) => normalizeDriver(row, userById.get(row.user?.id), deviceById.get(row.activityLastVehicle)));
       alerts = evaluateAlerts(drivers);
       render();
       announceNewAlerts(alerts);
-      // Historical activity is only a data-quality cross-check. Run it after
-      // the dashboard is visible so it cannot delay the driver list.
-      checkUnknownDrivers().then(() => renderTable()).catch((error) => {
-        console.warn('No se pudo contrastar la actividad histórica.', error);
-      });
       els.lastCheck.textContent = new Intl.DateTimeFormat('es-ES', { hour: '2-digit', minute: '2-digit' }).format(new Date());
       setConnection('Vigilancia activa', true);
     } catch (error) {
@@ -113,6 +115,41 @@
     } finally {
       loadInProgress = false;
     }
+  }
+
+  async function getRecentDrivingActivity(rows, fromDate, toDate) {
+    const uniqueIds = [...new Set(rows.map((row) => row.user?.id).filter(Boolean))];
+    const eligible = new Set();
+    // TachographDriverActivity is rate-limited, so send bounded batches via the
+    // API multiCall endpoint instead of opening one request per driver.
+    for (let offset = 0; offset < uniqueIds.length; offset += 80) {
+      const ids = uniqueIds.slice(offset, offset + 80);
+      const calls = ids.map((id) => ['Get', {
+        typeName: 'TachographDriverActivity',
+        search: { type: 'COMBINE', extrapolate: true, userSearch: { id }, fromDate, toDate }
+      }]);
+      const results = await multiCall(calls);
+      results.forEach((events, index) => {
+        if (Array.isArray(events) && events.some((event) => String(event.activity || '').toUpperCase() === 'DRIVING')) {
+          eligible.add(ids[index]);
+        }
+      });
+    }
+    return eligible;
+  }
+
+  function multiCall(calls) {
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const success = (value) => { if (!settled) { settled = true; resolve(value); } };
+      const failure = (error) => { if (!settled) { settled = true; reject(error); } };
+      try {
+        const result = api.multiCall(calls, success, failure);
+        if (result && typeof result.then === 'function') result.then(success, failure);
+      } catch (error) {
+        failure(error);
+      }
+    });
   }
 
   function isActiveUser(user, now) {
@@ -152,56 +189,8 @@
       nextCompensationDuration: Number(status.nextCompensationDuration) || 0,
       statusUnknown: String(status.activityStatus || '').toUpperCase() === 'UNKNOWN',
       hasZeroCounters: ['continuousDrivingTime', 'dailyDrivingTime', 'cumulatedWeeklyDrivingTime'].every((key) => Number(status[key]) === 0),
-      activityEvidence: null
+      activityEvidence: true
     };
-  }
-
-  async function checkUnknownDrivers() {
-    const now = Date.now();
-    const unresolved = drivers.filter((driver) => driver.statusUnknown && driver.hasZeroCounters && driver.id);
-    const due = unresolved.filter((driver) => {
-      const previous = activityChecks.get(driver.id);
-      return !activityChecksInFlight.has(driver.id) && (!previous || now - previous.checkedAt >= 10 * 60 * 1000);
-    }).slice(0, 12);
-    if (!due.length) {
-      for (const driver of drivers) driver.activityEvidence = activityChecks.get(driver.id) ?? null;
-      return;
-    }
-    const fromDate = new Date(now - 14 * 24 * 60 * 60 * 1000).toISOString();
-    const toDate = new Date(now).toISOString();
-    due.forEach((driver) => activityChecksInFlight.add(driver.id));
-    const checks = await Promise.allSettled(due.map(async (driver) => {
-      const rows = await api.call('Get', {
-        typeName: 'TachographDriverActivity',
-        search: {
-          type: 'COMBINE',
-          extrapolate: true,
-          userSearch: { id: driver.id },
-          fromDate,
-          toDate
-        }
-      });
-      return [driver.id, { ...summarizeRecentDriving(rows, now), checkedAt: now }];
-    }));
-    for (const check of checks) {
-      if (check.status === 'fulfilled') activityChecks.set(check.value[0], check.value[1]);
-    }
-    due.forEach((driver) => activityChecksInFlight.delete(driver.id));
-    for (const driver of drivers) driver.activityEvidence = activityChecks.get(driver.id) ?? null;
-  }
-
-  function summarizeRecentDriving(events, now) {
-    const sorted = (Array.isArray(events) ? events : []).map((event) => ({
-      time: new Date(event.dateTime || event.time).getTime(),
-      activity: String(event.activity || '').toUpperCase()
-    })).filter((event) => Number.isFinite(event.time)).sort((a, b) => a.time - b.time);
-    let drivingSeconds = 0;
-    for (let index = 0; index < sorted.length; index += 1) {
-      const current = sorted[index];
-      const nextTime = sorted[index + 1]?.time ?? now;
-      if (current.activity === 'DRIVING' && nextTime > current.time) drivingSeconds += (Math.min(nextTime, now) - current.time) / 1000;
-    }
-    return { drivingSeconds: Math.max(0, Math.floor(drivingSeconds)), events: sorted.length };
   }
 
   function thresholdAlerts(driver) {
@@ -249,15 +238,15 @@
       return true;
     });
     if (!filtered.length) {
-      els.body.innerHTML = `<tr><td colspan="6" class="empty-state"><strong>${drivers.length ? 'No hay resultados' : 'No hay conductores disponibles'}</strong><span>${drivers.length ? 'Prueba a cambiar el filtro o la búsqueda.' : 'Comprueba que los conductores tengan datos de tacógrafo y permisos de acceso.'}</span></td></tr>`;
+      els.body.innerHTML = `<tr><td colspan="6" class="empty-state"><strong>${drivers.length ? 'No hay resultados' : 'Sin actividad de conducción reciente'}</strong><span>${drivers.length ? 'Prueba a cambiar el filtro o la búsqueda.' : 'Solo se muestran conductores activos con actividad DRIVING del tacógrafo en los últimos 7 días.'}</span></td></tr>`;
     } else {
       els.body.innerHTML = filtered.map((driver) => {
         const statusAlerts = alerts.filter((item) => item.driver.id === driver.id);
         const severe = statusAlerts.some((item) => item.exceeded);
         const unavailable = driver.statusUnknown && driver.hasZeroCounters;
         const badge = severe ? '<span class="badge badge-red">Límite superado</span>' : statusAlerts.length ? '<span class="badge badge-amber">Próximo límite</span>' : unavailable ? '<span class="badge badge-gray">Datos no confirmados</span>' : '<span class="badge badge-green">Dentro de límite</span>';
-        const evidence = unavailable && driver.activityEvidence?.drivingSeconds > 0
-          ? `Conducción registrada en actividad (14 días): ${formatDuration(driver.activityEvidence.drivingSeconds)}; resumen de estado sin confirmar`
+        const evidence = unavailable && driver.activityEvidence
+          ? 'Actividad DRIVING registrada en los últimos 7 días; resumen de estado sin confirmar'
           : unavailable ? 'Estado del tacógrafo desconocido; no se muestran ceros como tiempos válidos' : escapeHtml(driver.activity);
         const continuous = unavailable ? '—' : formatDuration(driver.continuous);
         const daily = unavailable ? '—' : formatDuration(driver.daily);
