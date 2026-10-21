@@ -22,8 +22,14 @@
   let drivers = [];
   let alerts = [];
   let latestStatus = [];
+  let pendingActivityChecks = 0;
   let shownAlertKeys = new Set();
   let uiBound = false;
+  const activityEligibilityCache = new Map();
+  const ACTIVITY_CACHE_MS = 10 * 60 * 1000;
+  const ACTIVITY_RETRY_MS = 60 * 1000;
+  const MAX_ACTIVITY_CHECKS_PER_REFRESH = 60;
+  let activityCursor = 0;
   let alertPrefs = { preventive: true, exceeded: true };
 
   function initElements() {
@@ -90,13 +96,16 @@
       // rows that match a currently active MyGeotab User record.
       const activeStatus = latestStatus.filter((row) => userById.has(row.user?.id));
       setConnection('Comprobando actividad de los últimos 7 días…', false);
+      let activityResult = { eligible: new Set(), pending: 0, error: null };
       if (activeStatus.length) {
         const fromDate = new Date(now - 7 * 24 * 60 * 60 * 1000).toISOString();
         const toDate = new Date(now).toISOString();
-        const activityByUser = await getRecentDrivingActivity(activeStatus, fromDate, toDate);
-        latestStatus = activeStatus.filter((row) => activityByUser.has(row.user?.id));
+        activityResult = await getRecentDrivingActivity(activeStatus, fromDate, toDate, now);
+        pendingActivityChecks = activityResult.pending;
+        latestStatus = activeStatus.filter((row) => activityResult.eligible.has(row.user?.id));
       } else {
         latestStatus = [];
+        pendingActivityChecks = 0;
       }
       const vehicleIds = [...new Set(latestStatus.map((row) => row.activityLastVehicle).filter(Boolean))];
       const devices = vehicleIds.length ? await callGet('Device', { deviceIds: vehicleIds }, ['id', 'name', 'licensePlate']) : [];
@@ -106,7 +115,11 @@
       render();
       announceNewAlerts(alerts);
       els.lastCheck.textContent = new Intl.DateTimeFormat('es-ES', { hour: '2-digit', minute: '2-digit' }).format(new Date());
-      setConnection('Vigilancia activa', true);
+      setConnection(activityResult.error ? 'Vigilancia parcial · límite API' : 'Vigilancia activa', !activityResult.error);
+      if (activityResult.pending && !activityResult.error) {
+        console.info(`${activityResult.pending} conductores pendientes de comprobar actividad reciente.`);
+      }
+      if (activityResult.error) console.warn('No se pudieron comprobar todos los conductores por el límite de consultas.', activityResult.error);
     } catch (error) {
       console.error('No se pudo consultar el estado del tacógrafo.', error);
       setConnection('Sin conexión', false);
@@ -117,25 +130,46 @@
     }
   }
 
-  async function getRecentDrivingActivity(rows, fromDate, toDate) {
+  async function getRecentDrivingActivity(rows, fromDate, toDate, now) {
     const uniqueIds = [...new Set(rows.map((row) => row.user?.id).filter(Boolean))];
-    const eligible = new Set();
+    const dueIds = uniqueIds.filter((id) => {
+      const cached = activityEligibilityCache.get(id);
+      if (!cached) return true;
+      return cached.eligible === null
+        ? now - cached.checkedAt >= ACTIVITY_RETRY_MS
+        : now - cached.checkedAt >= ACTIVITY_CACHE_MS;
+    });
+    const startAt = uniqueIds.length ? activityCursor % uniqueIds.length : 0;
+    const rotatedDue = dueIds.filter((id) => uniqueIds.indexOf(id) >= startAt)
+      .concat(dueIds.filter((id) => uniqueIds.indexOf(id) < startAt));
+    const selectedIds = rotatedDue.slice(0, MAX_ACTIVITY_CHECKS_PER_REFRESH);
+    if (selectedIds.length && uniqueIds.length) activityCursor = (uniqueIds.indexOf(selectedIds[selectedIds.length - 1]) + 1) % uniqueIds.length;
+    let error = null;
     // TachographDriverActivity is rate-limited, so send bounded batches via the
-    // API multiCall endpoint instead of opening one request per driver.
-    for (let offset = 0; offset < uniqueIds.length; offset += 80) {
-      const ids = uniqueIds.slice(offset, offset + 80);
-      const calls = ids.map((id) => ['Get', {
+    // API. multiCall reduces transport overhead, but each inner request still
+    // counts against the endpoint quota.
+    if (selectedIds.length) {
+      const calls = selectedIds.map((id) => ['Get', {
         typeName: 'TachographDriverActivity',
         search: { type: 'COMBINE', extrapolate: true, userSearch: { id }, fromDate, toDate }
       }]);
-      const results = await multiCall(calls);
-      results.forEach((events, index) => {
-        if (Array.isArray(events) && events.some((event) => String(event.activity || '').toUpperCase() === 'DRIVING')) {
-          eligible.add(ids[index]);
-        }
-      });
+      try {
+        const results = await multiCall(calls);
+        results.forEach((events, index) => {
+          const hasDriving = Array.isArray(events) && events.some((event) => String(event.activity || '').toUpperCase() === 'DRIVING');
+          activityEligibilityCache.set(selectedIds[index], { eligible: hasDriving, checkedAt: now });
+        });
+      } catch (cause) {
+        error = cause;
+        selectedIds.forEach((id) => activityEligibilityCache.set(id, { eligible: null, checkedAt: now }));
+      }
     }
-    return eligible;
+    const eligible = new Set(uniqueIds.filter((id) => activityEligibilityCache.get(id)?.eligible === true));
+    const pending = uniqueIds.filter((id) => {
+      const cached = activityEligibilityCache.get(id);
+      return !cached || cached.eligible === null || now - cached.checkedAt >= ACTIVITY_CACHE_MS;
+    }).length;
+    return { eligible, pending, error };
   }
 
   function multiCall(calls) {
@@ -238,7 +272,8 @@
       return true;
     });
     if (!filtered.length) {
-      els.body.innerHTML = `<tr><td colspan="6" class="empty-state"><strong>${drivers.length ? 'No hay resultados' : 'Sin actividad de conducción reciente'}</strong><span>${drivers.length ? 'Prueba a cambiar el filtro o la búsqueda.' : 'Solo se muestran conductores activos con actividad DRIVING del tacógrafo en los últimos 7 días.'}</span></td></tr>`;
+      const checking = !drivers.length && pendingActivityChecks > 0;
+      els.body.innerHTML = `<tr><td colspan="6" class="empty-state"><strong>${drivers.length ? 'No hay resultados' : checking ? 'Comprobando actividad reciente' : 'Sin actividad de conducción reciente'}</strong><span>${drivers.length ? 'Prueba a cambiar el filtro o la búsqueda.' : checking ? `Quedan ${pendingActivityChecks} conductores por comprobar; se procesan por tandas para respetar el límite de la API.` : 'Solo se muestran conductores activos con actividad DRIVING del tacógrafo en los últimos 7 días.'}</span></td></tr>`;
     } else {
       els.body.innerHTML = filtered.map((driver) => {
         const statusAlerts = alerts.filter((item) => item.driver.id === driver.id);
