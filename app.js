@@ -142,11 +142,17 @@
     const dailyLeft = secondsLeft(status, 'dailyDrivingAvailableTime', 'dailyDrivingTime', 'dailyDrivingTimeLimit');
     const weeklyLeft = secondsLeft(status, 'weeklyDrivingAvailableTime', 'cumulatedWeeklyDrivingTime', null);
     const biweeklyLeft = secondsLeft(status, 'biweeklyDrivingAvailableTime', 'cumulatedBiweeklyDrivingTime', null);
+    const activity = getCurrentActivity(status);
+    const restStartedAt = parseTimestamp(status.restActivityStart);
+    const reportedRestSeconds = Math.max(0, Number(status.restDuration) || 0);
+    const liveRestSeconds = activity === 'REST' && restStartedAt !== null
+      ? Math.max(0, Math.floor(Date.now() / 1000 - restStartedAt))
+      : 0;
     return {
       id: status.user?.id,
       name: [user?.firstName, user?.lastName].filter(Boolean).join(' ').trim() || status.user?.id || 'Conductor sin nombre',
       vehicle: device?.licensePlate || device?.name || status.activityLastVehicle || 'Sin vehículo asociado',
-      activity: status.activityStatus || status.workActivityStatus || 'UNKNOWN',
+      activity,
       continuous: Number(status.continuousDrivingTime) || 0,
       continuousLeft,
       daily: Number(status.dailyDrivingTime) || 0,
@@ -157,17 +163,34 @@
       biweekly: Number(status.cumulatedBiweeklyDrivingTime) || 0,
       biweeklyLeft,
       restStart: status.restActivityStart,
-      restDuration: Number(status.restDuration) || 0,
+      restStartedAt,
+      restDuration: activity === 'REST' ? Math.max(reportedRestSeconds, liveRestSeconds) : reportedRestSeconds,
       dailyRestType: status.dailyRestType,
       dailyRestMinimum: status.dailyDrivingRestMinType,
       nextRestStartLimit: status.nextRestMaxStartTime,
       weeklyRestStartLimit: status.weeklyRestMaxStartTime,
       pendingCompensations: Number(status.pendingCompensations) || 0,
       nextCompensationDuration: Number(status.nextCompensationDuration) || 0,
-      statusUnknown: String(status.activityStatus || '').toUpperCase() === 'UNKNOWN',
+      statusUnknown: activity === 'UNKNOWN',
       hasZeroCounters: ['continuousDrivingTime', 'dailyDrivingTime', 'cumulatedWeeklyDrivingTime'].every((key) => Number(status[key]) === 0),
-      activityEvidence: true
     };
+  }
+
+  function getCurrentActivity(status) {
+    const known = new Set(['DRIVING', 'WORKING', 'AVAILABLE', 'REST']);
+    const states = [status.activityStatus, status.workActivityStatus]
+      .map((value) => String(value || '').toUpperCase());
+    return states.find((value) => known.has(value)) || 'UNKNOWN';
+  }
+
+  function parseTimestamp(value) {
+    if (value === null || value === undefined || value === '') return null;
+    if (typeof value === 'number' || /^\d+(\.\d+)?$/.test(String(value))) {
+      const numeric = Number(value);
+      return numeric > 1e12 ? numeric / 1000 : numeric;
+    }
+    const milliseconds = Date.parse(value);
+    return Number.isFinite(milliseconds) ? milliseconds / 1000 : null;
   }
 
   function thresholdAlerts(driver) {
@@ -177,8 +200,58 @@
       ['weekly', 'Conducción semanal', driver.weeklyLeft, LIMITS.weekly],
       ['biweekly', 'Conducción bisemanal', driver.biweeklyLeft, LIMITS.biweekly]
     ];
-    return thresholds.filter(([, , left]) => left !== null && left <= WARNING_SECONDS)
+    return thresholds.filter(([key, , left]) => left !== null && left <= WARNING_SECONDS &&
+      !(driver.activity === 'REST' && (key === 'continuous' || key === 'daily')))
       .map(([key, label, left, limit]) => ({ driver, key, label, left, exceeded: left < 0, limit }));
+  }
+
+  function activityLabel(activity) {
+    return ({ DRIVING: 'Conduciendo', WORKING: 'Otros trabajos', AVAILABLE: 'Disponibilidad', REST: 'En descanso', UNKNOWN: 'Sin lectura actual' })[activity] || 'Sin lectura actual';
+  }
+
+  function dailyRestRequirement(driver) {
+    const type = String(driver.dailyRestMinimum || driver.dailyRestType || '').toUpperCase();
+    if (type === 'DAILYREGULAR') return { label: 'diario regular (11 h)', seconds: 11 * 3600 };
+    if (type === 'DAILYREDUCED') return { label: 'diario reducido (9 h)', seconds: 9 * 3600 };
+    if (type === 'DAILYSPLIT') return { label: 'diario fraccionado (3 h + 9 h)', seconds: null };
+    return null;
+  }
+
+  function weeklyRestRequirement(driver) {
+    const type = String(driver.dailyRestType || '').toUpperCase();
+    if (type === 'WEEKLYREGULAR') return { label: 'semanal regular (45 h)', seconds: 45 * 3600 };
+    if (type === 'WEEKLYREDUCED') return { label: 'semanal reducido (24 h mín.)', seconds: 24 * 3600 };
+    return null;
+  }
+
+  function restProgress(driver) {
+    if (driver.activity !== 'REST') {
+      if (driver.activity === 'UNKNOWN') {
+        const lastStart = driver.restStartedAt === null ? '' : `Último inicio de descanso registrado: ${new Intl.DateTimeFormat('es-ES', { dateStyle: 'short', timeStyle: 'short' }).format(new Date(driver.restStartedAt * 1000))}.`;
+        return lastStart || 'El tacógrafo no confirma la actividad actual.';
+      }
+      return 'Sin descanso en curso';
+    }
+    const elapsed = formatDuration(driver.restDuration);
+    const lines = [`Descanso en curso · ${elapsed} acumulados`];
+    const continuousBreakMet = driver.continuous === 0 || driver.restDuration >= 45 * 60;
+    lines.push(continuousBreakMet
+      ? 'Pausa continua (45 min): cumplida'
+      : `Pausa continua: faltan ${formatDuration(45 * 60 - driver.restDuration)}`);
+    const daily = dailyRestRequirement(driver);
+    if (daily?.seconds) {
+      const left = Math.max(0, daily.seconds - driver.restDuration);
+      lines.push(left ? `Descanso ${daily.label}: faltan ${formatDuration(left)}` : `Descanso ${daily.label}: cumplido`);
+    } else if (daily) {
+      lines.push(`Descanso ${daily.label}: el estado del fraccionamiento debe confirmarlo el tacógrafo`);
+    }
+    const weekly = weeklyRestRequirement(driver);
+    if (weekly) {
+      const left = Math.max(0, weekly.seconds - driver.restDuration);
+      lines.push(left ? `Descanso ${weekly.label}: faltan ${formatDuration(left)}` : `Descanso ${weekly.label}: cumplido`);
+    }
+    if (!daily && !weekly) lines.push('Tipo de descanso diario/semanal aún sin clasificar');
+    return lines.join(' · ');
   }
 
   function evaluateAlerts(rows) {
@@ -215,22 +288,22 @@
       return true;
     }).sort(compareDriverUrgency);
     if (!filtered.length) {
-      els.body.innerHTML = `<tr><td colspan="6" class="empty-state"><strong>${drivers.length ? 'No hay resultados' : 'Sin actividad en la semana actual'}</strong><span>${drivers.length ? 'Prueba a cambiar el filtro o la búsqueda.' : 'Solo se muestran conductores activos con conducción registrada en la semana reglamentaria actual.'}</span></td></tr>`;
+      els.body.innerHTML = `<tr><td colspan="7" class="empty-state"><strong>${drivers.length ? 'No hay resultados' : 'Sin actividad en la semana actual'}</strong><span>${drivers.length ? 'Prueba a cambiar el filtro o la búsqueda.' : 'Solo se muestran conductores activos con conducción registrada en la semana reglamentaria actual.'}</span></td></tr>`;
     } else {
       els.body.innerHTML = filtered.map((driver) => {
         const statusAlerts = alerts.filter((item) => item.driver.id === driver.id);
         const severe = statusAlerts.some((item) => item.exceeded);
         const unavailable = driver.statusUnknown && driver.hasZeroCounters;
         const badge = severe ? '<span class="badge badge-red">Límite superado</span>' : statusAlerts.length ? '<span class="badge badge-amber">Próximo límite</span>' : unavailable ? '<span class="badge badge-gray">Datos no confirmados</span>' : '<span class="badge badge-green">Dentro de límite</span>';
-        const evidence = unavailable && driver.activityEvidence
-          ? 'Conducción registrada en la semana actual; resumen de estado sin confirmar'
-          : unavailable ? 'Estado del tacógrafo desconocido; no se muestran ceros como tiempos válidos' : escapeHtml(driver.activity);
+        const evidence = unavailable
+          ? 'Estado del tacógrafo desconocido; no se muestran ceros como tiempos válidos'
+          : escapeHtml(driver.activity);
         const continuous = unavailable ? '—' : formatDuration(driver.continuous);
         const daily = unavailable ? '—' : formatDuration(driver.daily);
         const weekly = unavailable ? '—' : formatDuration(driver.weekly);
         const biweekly = unavailable ? '—' : formatDuration(driver.biweekly);
         const left = (value, label) => unavailable ? 'Sin datos confirmados' : remainingLabel(value, label);
-        return `<tr><td><strong class="driver-name">${escapeHtml(driver.name)}</strong><small class="cell-sub">${evidence}</small></td><td>${escapeHtml(driver.vehicle)}</td><td>${continuous}<small class="cell-sub">${left(driver.continuousLeft, 'pausa')}</small></td><td>${daily}<small class="cell-sub">${left(driver.dailyLeft, 'disponibles')}</small></td><td>${weekly}<small class="cell-sub">${left(driver.weeklyLeft, 'semanales')} · ${biweekly} 2 sem.</small></td><td>${badge}</td></tr>`;
+        return `<tr><td><strong class="driver-name">${escapeHtml(driver.name)}</strong><small class="cell-sub">${evidence}</small></td><td>${escapeHtml(driver.vehicle)}</td><td class="activity-cell"><strong>${escapeHtml(activityLabel(driver.activity))}</strong><small class="cell-sub">${escapeHtml(restProgress(driver))}</small></td><td>${continuous}<small class="cell-sub">${left(driver.continuousLeft, 'pausa')}</small></td><td>${daily}<small class="cell-sub">${left(driver.dailyLeft, 'disponibles')}</small></td><td>${weekly}<small class="cell-sub">${left(driver.weeklyLeft, 'semanales')} · ${biweekly} 2 sem.</small></td><td>${badge}</td></tr>`;
       }).join('');
     }
     els.summary.textContent = `${filtered.length} de ${drivers.length} conductores`;
@@ -276,7 +349,7 @@
 
   function showLoadError(error, stage) {
     const message = getLoadErrorMessage(error, stage);
-    els.body.innerHTML = `<tr><td colspan="6" class="empty-state"><strong>No se pudo cargar la flota</strong><span>${escapeHtml(message)}</span></td></tr>`;
+    els.body.innerHTML = `<tr><td colspan="7" class="empty-state"><strong>No se pudo cargar la flota</strong><span>${escapeHtml(message)}</span></td></tr>`;
     els.alerts.innerHTML = `<div class="empty-alert"><strong>Vigilancia sin datos</strong><span>Se necesita permiso de lectura del estado de tacógrafo en MyGeotab.</span></div>`;
     els.summary.textContent = 'No se pudieron cargar los conductores';
   }
@@ -383,7 +456,7 @@
     window.setTimeout(() => {
       if (!api) {
         setConnection('Esperando sesión de MyGeotab', false);
-        els.body.innerHTML = '<tr><td colspan="6" class="empty-state"><strong>Abre este add-in desde MyGeotab</strong><span>Los datos de flota se cargan usando tu sesión y permisos de MyGeotab.</span></td></tr>';
+        els.body.innerHTML = '<tr><td colspan="7" class="empty-state"><strong>Abre este add-in desde MyGeotab</strong><span>Los datos de flota se cargan usando tu sesión y permisos de MyGeotab.</span></td></tr>';
         els.summary.textContent = 'Sesión de MyGeotab no detectada';
         els.lastCheck.textContent = 'Sin sesión';
       }

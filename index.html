@@ -6,7 +6,7 @@
   <meta name="theme-color" content="#ffffff">
   <title>Tiempos de conducción | MyGeotab</title>
   <link rel="stylesheet" href="styles.css">
-  <script defer src="app.js?v=0.1.8"></script>
+  <script defer src="app.js?v=0.1.9"></script>
 </head>
 <body>
   <div class="app-shell">
@@ -32,7 +32,7 @@
         <article class="panel drivers-panel">
           <div class="panel-heading"><div><h2>Conductores</h2><p>Estado de conducción y límites próximos</p></div><button class="button button-tertiary" id="filters-button"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 5h14M5.5 10h9M8 15h4"/></svg>Filtros <span id="filter-count" class="filter-count">0</span></button></div>
           <div class="filters" id="filters" hidden><label class="search-box"><svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="8.7" cy="8.7" r="5.4"/><path d="m13 13 4 4"/></svg><input id="search" type="search" placeholder="Buscar conductor o vehículo" aria-label="Buscar conductor o vehículo"></label><select id="alert-filter" aria-label="Filtrar por estado"><option value="all">Todos los estados</option><option value="active">Avisos activos</option><option value="upcoming">Próximos límites</option><option value="ok">Sin avisos</option></select></div>
-          <div class="table-wrap"><table><thead><tr><th>CONDUCTOR</th><th>VEHÍCULO</th><th>CONDUCCIÓN CONTINUA</th><th>DIARIA</th><th>SEMANAL / 2 SEMANAS</th><th>ESTADO</th></tr></thead><tbody id="drivers-body"><tr><td colspan="6" class="empty-state"><span class="loader"></span><strong>Conectando con MyGeotab</strong><span>Estamos obteniendo el estado de los tacógrafos.</span></td></tr></tbody></table></div>
+          <div class="table-wrap"><table><thead><tr><th>CONDUCTOR</th><th>VEHÍCULO</th><th>ACTIVIDAD / DESCANSO</th><th>CONDUCCIÓN CONTINUA</th><th>DIARIA</th><th>SEMANAL / 2 SEMANAS</th><th>ESTADO</th></tr></thead><tbody id="drivers-body"><tr><td colspan="7" class="empty-state"><span class="loader"></span><strong>Conectando con MyGeotab</strong><span>Estamos obteniendo el estado de los tacógrafos.</span></td></tr></tbody></table></div>
           <div class="table-footer"><span id="table-summary">Cargando conductores…</span><span class="source-note">Datos de tacógrafo · actualización periódica</span></div>
         </article>
         <aside class="panel alerts-panel"><div class="panel-heading"><div><h2>Centro de avisos</h2><p>Incidencias de la flota</p></div><span class="live-pill"><i></i> EN VIVO</span></div><div id="alert-list" class="alert-list"><div class="empty-alert"><div class="empty-check"><svg viewBox="0 0 24 24"><path d="m5 12 4.3 4.3L19 6.8"/></svg></div><strong>Preparando vigilancia</strong><span>Los avisos aparecerán aquí al detectar un límite próximo o superado.</span></div></div><button class="text-button" id="show-all">Ver todos los avisos <span aria-hidden="true">→</span></button></aside>
